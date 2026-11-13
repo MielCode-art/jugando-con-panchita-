@@ -12,6 +12,163 @@ let preguntas = [];
 
 let tiempoRestante = 15;
 let temporizador = null;
+let respuestaBloqueada = false;
+let audioContexto = null;
+let musicaActiva = false;
+let sonidoActivado = true;
+let intervaloMusica = null;
+let notaMusica = 0;
+let musicaModo = "";
+let actividadCompletada = false;
+let permitirSonidosJuego = false;
+const osciladoresActivos = new Set();
+
+// Progreso independiente para cada actividad.
+const CLAVE_PROGRESO = "panchita_progreso_v1";
+function leerProgresos() {
+    try { return JSON.parse(localStorage.getItem(CLAVE_PROGRESO) || "{}"); }
+    catch (error) { return {}; }
+}
+function guardarProgreso(completado = false) {
+    if (!tipoJuego || !preguntas.length) return;
+    const datos = leerProgresos();
+    const anterior = datos[tipoJuego] || {};
+    datos[tipoJuego] = {
+        nivel, puntos, vidas, preguntaActual,
+        preguntas: JSON.parse(JSON.stringify(preguntas)),
+        tiempoRestante,
+        nivelMaximo: Math.max(anterior.nivelMaximo || 1, nivel),
+        completado
+    };
+    try {
+        localStorage.setItem(CLAVE_PROGRESO, JSON.stringify(datos));
+    } catch (error) {
+        console.warn("No se pudo guardar el progreso en este navegador.", error);
+    }
+}
+function borrarProgreso(tipo) {
+    const datos = leerProgresos();
+    delete datos[tipo];
+    try { localStorage.setItem(CLAVE_PROGRESO, JSON.stringify(datos)); } catch (error) {}
+}
+function iniciarAudio() {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx || !sonidoActivado) return;
+    if (!audioContexto) audioContexto = new AudioCtx();
+    if (audioContexto.state === "suspended") audioContexto.resume();
+    // La música se inicia únicamente desde abrirJuego() o volverMenuJuegos().
+    // Así, un efecto de sonido atrasado no vuelve a encender la música del juego.
+}
+function tono(frecuencia, duracion=0.16, volumen=0.75, forma="sine") {
+    if (!sonidoActivado || !permitirSonidosJuego) return;
+    iniciarAudio();
+    if (!audioContexto) return;
+    const oscilador = audioContexto.createOscillator();
+    const ganancia = audioContexto.createGain();
+    oscilador.type = forma;
+    oscilador.frequency.value = frecuencia;
+    ganancia.gain.setValueAtTime(0.0001, audioContexto.currentTime);
+    ganancia.gain.exponentialRampToValueAtTime(Math.max(0.001, volumen), audioContexto.currentTime + 0.015);
+    ganancia.gain.exponentialRampToValueAtTime(0.0001, audioContexto.currentTime + duracion);
+    oscilador.connect(ganancia); ganancia.connect(audioContexto.destination);
+    osciladoresActivos.add(oscilador);
+    oscilador.onended = () => osciladoresActivos.delete(oscilador);
+    oscilador.start(); oscilador.stop(audioContexto.currentTime + duracion + 0.03);
+}
+function sonidoCorrecto() { tono(660, .18, .85); setTimeout(() => tono(880, .22, .85), 130); }
+function sonidoIncorrecto() { tono(220, .28, .8, "triangle"); }
+function sonidoBoton() { tono(520, .09, .65); }
+function iniciarMusica(modo = "juego") {
+    if (!sonidoActivado || !audioContexto) return;
+    if (musicaActiva && musicaModo === modo) return;
+
+    detenerMusica();
+    musicaModo = modo;
+    musicaActiva = true;
+    notaMusica = 0;
+
+    // Melodía tranquila para el menú y melodía alegre durante los juegos.
+    const melodias = {
+        juego: [523, 659, 784, 659, 587, 698, 784, 698],
+        menu: [392, 494, 587, 494, 440, 523, 587, 523]
+    };
+    const melodia = melodias[modo] || melodias.juego;
+
+    intervaloMusica = setInterval(() => {
+        if (!sonidoActivado || !audioContexto || !musicaActiva) return;
+        tono(melodia[notaMusica % melodia.length], .30, modo === "menu" ? .12 : .16);
+        notaMusica++;
+    }, modo === "menu" ? 560 : 430);
+}
+function detenerMusica() {
+    musicaActiva = false;
+    if (intervaloMusica !== null) {
+        clearInterval(intervaloMusica);
+        intervaloMusica = null;
+    }
+    musicaModo = "";
+}
+function alternarSonido() {
+    sonidoActivado = !sonidoActivado;
+    const boton = document.getElementById("botonSonidoPanchita");
+    if (boton) boton.textContent = sonidoActivado ? "🔊 Sonido activado" : "🔇 Sonido apagado";
+    if (sonidoActivado) {
+        if (audioContexto && audioContexto.state === "suspended") audioContexto.resume();
+        if (permitirSonidosJuego) iniciarMusica("juego");
+    } else {
+        detenerMusica();
+    }
+}
+function prepararControlesJuego() {
+    if (document.getElementById("controlesPanchita")) return;
+    const zona = document.createElement("div");
+    zona.id = "controlesPanchita";
+    zona.style.cssText = "display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:18px auto;max-width:850px;";
+    zona.innerHTML = `
+      <button class="btn-volver" type="button" onclick="alternarSonido()" id="botonSonidoPanchita">🔊 Sonido activado</button>
+      ${botonesOtrasActividades()}
+      <button class="btn-volver" type="button" onclick="volverMenuJuegos()">🎮 Menú principal</button>`;
+    const pantalla = document.getElementById("pantallaJuego");
+    pantalla.appendChild(zona);
+}
+function volverMenuJuegos() {
+    // Guardar antes de ocultar la partida para poder retomarla después.
+    // Si ya terminó los cinco niveles, conservar el registro de completado.
+    if (!actividadCompletada) guardarProgreso();
+    detenerTemporizador();
+    const pantalla = document.getElementById("pantallaJuego");
+    if (pantalla) pantalla.style.display = "none";
+
+    // La música del juego se corta y se cambia por la melodía del menú.
+    permitirSonidosJuego = false;
+    detenerMusica();
+    // Cortar inmediatamente cualquier nota o efecto que siga sonando.
+    for (const oscilador of osciladoresActivos) {
+        try { oscilador.stop(); } catch (error) {}
+    }
+    osciladoresActivos.clear();
+
+    // Suspender por completo el AudioContext: así no queda ninguna nota
+    // reproduciéndose en segundo plano al regresar al menú principal.
+    if (audioContexto && audioContexto.state === "running") {
+        audioContexto.suspend().catch(() => {});
+    }
+
+    actualizarProgresoGeneral(true);
+    const menu = document.getElementById("juegos");
+    if (menu) menu.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function cambiarActividad(tipo) {
+    sonidoBoton();
+    if (!actividadCompletada) guardarProgreso();
+    document.getElementById("gameOverPanchita")?.remove();
+    abrirJuego(tipo);
+}
+function botonesOtrasActividades() {
+    const nombres = { sinonimos: ["antonimos", "oraciones"], antonimos: ["sinonimos", "oraciones"], oraciones: ["sinonimos", "antonimos"] };
+    const etiquetas = { sinonimos: "📚 Sinónimos", antonimos: "🔄 Antónimos", oraciones: "✍️ Oraciones simples" };
+    return (nombres[tipoJuego] || []).map(tipo => `<button type="button" class="btn-volver" onclick="cambiarActividad('${tipo}')">${etiquetas[tipo]}</button>`).join("");
+}
 
 // ==============================
 // 📚 PREGUNTAS DE SINÓNIMOS
@@ -194,38 +351,35 @@ let preguntasOracionesNivel5 = [
 // FUNCIONES DEL JUEGO
 //==================================================
 
-function abrirJuego(tipo){
+function abrirJuego(tipo, reiniciar=false){
+    detenerTemporizador();
+    permitirSonidosJuego = true;
+    actividadCompletada = false;
     tipoJuego = tipo;
-
-    // Resetear variables al abrir el juego
-    nivel = 1;
-    puntos = 0;
-    vidas = 3;
-    preguntaActual = 0;
-
-    // Asignar primer nivel
-    if(tipo === "sinonimos"){
-        preguntas = [...preguntasNivel1];
-        document.getElementById("tituloJuego").innerHTML = "📚 Juego de Sinónimos";
+    respuestaBloqueada = false;
+    const datosGuardados = leerProgresos()[tipo];
+    if (!reiniciar && datosGuardados && !datosGuardados.completado && Array.isArray(datosGuardados.preguntas)) {
+        nivel = datosGuardados.nivel || 1;
+        puntos = datosGuardados.puntos || 0;
+        vidas = Math.max(1, Number(datosGuardados.vidas) || 3);
+        preguntaActual = datosGuardados.preguntaActual || 0;
+        preguntas = JSON.parse(JSON.stringify(datosGuardados.preguntas));
+    } else {
+        nivel = 1; puntos = 0; vidas = 3; preguntaActual = 0;
+        if(tipo === "sinonimos") preguntas = JSON.parse(JSON.stringify(preguntasNivel1));
+        else if(tipo === "antonimos") preguntas = JSON.parse(JSON.stringify(preguntasAntonimosNivel1));
+        else if(tipo === "oraciones") preguntas = JSON.parse(JSON.stringify(preguntasOracionesNivel1));
+        if (reiniciar) borrarProgreso(tipo);
     }
-    else if(tipo === "antonimos"){
-        preguntas = [...preguntasAntonimosNivel1];
-        document.getElementById("tituloJuego").innerHTML = "🔄 Juego de Antónimos";
-    }
-    else if(tipo === "oraciones"){
-        preguntas = [...preguntasOracionesNivel1];
-        document.getElementById("tituloJuego").innerHTML = "📝 Juego de Oraciones Simples";
-    }
-
-    // Mostrar y actualizar la pantalla
-    document.getElementById("progreso").style.width = "0%";
+    const titulos = { sinonimos: "📚 Juego de Sinónimos", antonimos: "🔄 Juego de Antónimos", oraciones: "📝 Juego de Oraciones Simples" };
+    document.getElementById("tituloJuego").innerHTML = titulos[tipo] || "🐼 Jugando con Panchita";
+    document.getElementById("progreso").style.width = (preguntaActual / Math.max(1, preguntas.length) * 100) + "%";
     document.getElementById("pantallaJuego").style.display = "block";
+    prepararControlesJuego();
     actualizarInterfazCompleta();
-
-    document.getElementById("pantallaJuego").scrollIntoView({
-        behavior: "smooth"
-    });
-
+    document.getElementById("pantallaJuego").scrollIntoView({ behavior: "smooth" });
+    iniciarAudio();
+    if (sonidoActivado && audioContexto) iniciarMusica("juego");
     cargarPregunta();
 }
 
@@ -237,18 +391,33 @@ function actualizarMarcadoresJuego() {
 }
 
 // Actualizar el panel de "Tu progreso" arriba de la página
-function actualizarProgresoGeneral() {
-    document.getElementById("progresoPuntos").innerHTML = puntos;
-    document.getElementById("progresoNivel").innerHTML = "Nivel " + nivel;
+function actualizarProgresoGeneral(enMenu = false) {
+    let puntosMostrar = puntos;
+    let nivelMostrar = nivel;
 
-    let estrellasHTML = "";
-    if (puntos < 40) { estrellasHTML = "⭐" }
-    else if (puntos < 80) { estrellasHTML = "⭐⭐" }
-    else if (puntos < 120) { estrellasHTML = "⭐⭐⭐" }
-    else if (puntos < 200) { estrellasHTML = "⭐⭐⭐⭐" }
-    else { estrellasHTML = "⭐⭐⭐⭐⭐" }
-    
-    document.getElementById("progresoEstrellas").innerHTML = estrellasHTML;
+    // En el menú se resume el avance guardado de las tres actividades.
+    if (enMenu) {
+        const guardados = leerProgresos();
+        const actividades = Object.values(guardados);
+        puntosMostrar = actividades.reduce((total, dato) => total + (Number(dato.puntos) || 0), 0);
+        nivelMostrar = actividades.reduce((mayor, dato) => Math.max(mayor, Number(dato.nivelMaximo || dato.nivel) || 1), 1);
+    }
+
+    const puntosElemento = document.getElementById("progresoPuntos");
+    const nivelElemento = document.getElementById("progresoNivel");
+    const estrellasElemento = document.getElementById("progresoEstrellas");
+    if (!puntosElemento || !nivelElemento || !estrellasElemento) return;
+
+    puntosElemento.textContent = puntosMostrar;
+    nivelElemento.textContent = "Nivel " + nivelMostrar;
+
+    let estrellasHTML = "⭐";
+    if (puntosMostrar >= 200) estrellasHTML = "⭐⭐⭐⭐⭐";
+    else if (puntosMostrar >= 120) estrellasHTML = "⭐⭐⭐⭐";
+    else if (puntosMostrar >= 80) estrellasHTML = "⭐⭐⭐";
+    else if (puntosMostrar >= 40) estrellasHTML = "⭐⭐";
+
+    estrellasElemento.innerHTML = estrellasHTML;
 }
 
 // Actualizar todos los datos visuales
@@ -270,130 +439,116 @@ function mezclarOpciones(pregunta){
 
 function cargarPregunta() {
     let p = preguntas[preguntaActual];
-
     if (!p) return;
-
+    respuestaBloqueada = false;
     mezclarOpciones(p);
-
     actualizarMarcadoresJuego();
-
     document.getElementById("pregunta").innerHTML = p.pregunta;
-    document.getElementById("r0").innerHTML = p.opciones[0];
-    document.getElementById("r1").innerHTML = p.opciones[1];
-    document.getElementById("r2").innerHTML = p.opciones[2];
-    document.getElementById("r3").innerHTML = p.opciones[3];
-
-    document.getElementById("mensajePanchita").innerHTML =
-        "🐼 ¡Escoge la respuesta correcta!";
-
+    [0,1,2,3].forEach(i => {
+        const boton = document.getElementById("r" + i);
+        boton.innerHTML = p.opciones[i];
+        boton.disabled = false;
+    });
+    document.getElementById("mensajePanchita").innerHTML = "🐼 ¡Escoge la respuesta correcta!";
     document.getElementById("mensajePanchita").style.color = "#4d9f3a";
-    document.getElementById("mensajePanchita").style.color = "#4d9f3a";
-
-iniciarTemporizador();
+    guardarProgreso();
+    iniciarTemporizador();
 }
-    function detenerTemporizador() {
-    clearInterval(temporizador);
-    temporizador = null;
-}
-
+function detenerTemporizador() { clearInterval(temporizador); temporizador = null; }
 function iniciarTemporizador() {
     detenerTemporizador();
-
     tiempoRestante = 15;
-
     const reloj = document.getElementById("tiempo");
-
-    if (!reloj) {
-        console.error("Falta el elemento HTML con id='tiempo'");
-        return;
-    }
-
+    if (!reloj) return;
     reloj.textContent = tiempoRestante;
-
-    temporizador = setInterval(function () {
+    temporizador = setInterval(() => {
         tiempoRestante--;
         reloj.textContent = tiempoRestante;
-
-        if (tiempoRestante <= 0) {
-            detenerTemporizador();
-            responder(-1);
-        }
+        if (tiempoRestante <= 0) { detenerTemporizador(); responder(-1); }
     }, 1000);
 }
-
 function responder(opcion){
+    if (respuestaBloqueada || !preguntas[preguntaActual]) return;
+    respuestaBloqueada = true;
     detenerTemporizador();
-    let correcta = preguntas[preguntaActual].correcta;
-
+    const correcta = preguntas[preguntaActual].correcta;
+    const mensaje = document.getElementById("mensajePanchita");
     if(opcion === correcta){
         puntos += 10;
-        document.getElementById("mensajePanchita").innerHTML = "🐼 ¡Excelente!";
-        document.getElementById("mensajePanchita").style.color = "#4CAF50";
-    }else{
+        mensaje.innerHTML = "🐼 ¡Excelente! ¡Respuesta correcta! ⭐";
+        mensaje.style.color = "#4CAF50";
+        sonidoCorrecto();
+    } else {
         vidas--;
-        document.getElementById("mensajePanchita").innerHTML = "🐼 Sigue intentando.";
-        document.getElementById("mensajePanchita").style.color = "#bb4555";
+        mensaje.innerHTML = opcion === -1 ? "⏰ ¡Se acabó el tiempo!" : "🐼 ¡Casi! La respuesta correcta era: " + preguntas[preguntaActual].opciones[correcta];
+        mensaje.style.color = "#bb4555";
+        sonidoIncorrecto();
     }
-
+    [0,1,2,3].forEach(i => document.getElementById("r"+i).disabled = true);
     actualizarInterfazCompleta();
-
-    // Control de Game Over
-    if(vidas <= 0){
-        mostrarGameOver();
-        return;
-    }
-
+    guardarProgreso();
+    if(vidas <= 0){ setTimeout(mostrarGameOver, 850); return; }
     preguntaActual++;
     document.getElementById("progreso").style.width = ((preguntaActual / preguntas.length) * 100) + "%";
-
-    // Control de Pase de Nivel
     if(preguntaActual >= preguntas.length){
-        
         let subioDeNivel = false;
         preguntaActual = 0;
         document.getElementById("progreso").style.width = "0%";
-
         if(tipoJuego === "oraciones"){
-            if(nivel === 1){ nivel = 2; preguntas = [...preguntasOracionesNivel2]; subioDeNivel = true; }
-            else if(nivel === 2){ nivel = 3; preguntas = [...preguntasOracionesNivel3]; subioDeNivel = true; }
-            else if(nivel === 3){ nivel = 4; preguntas = [...preguntasOracionesNivel4]; subioDeNivel = true; }
-            else if(nivel === 4){ nivel = 5; preguntas = [...preguntasOracionesNivel5]; subioDeNivel = true; }
+            if(nivel===1){nivel=2;preguntas=JSON.parse(JSON.stringify(preguntasOracionesNivel2));subioDeNivel=true;}
+            else if(nivel===2){nivel=3;preguntas=JSON.parse(JSON.stringify(preguntasOracionesNivel3));subioDeNivel=true;}
+            else if(nivel===3){nivel=4;preguntas=JSON.parse(JSON.stringify(preguntasOracionesNivel4));subioDeNivel=true;}
+            else if(nivel===4){nivel=5;preguntas=JSON.parse(JSON.stringify(preguntasOracionesNivel5));subioDeNivel=true;}
+        } else if(tipoJuego === "sinonimos"){
+            if(nivel===1){nivel=2;preguntas=JSON.parse(JSON.stringify(preguntasNivel2));subioDeNivel=true;}
+            else if(nivel===2){nivel=3;preguntas=JSON.parse(JSON.stringify(preguntasNivel3));subioDeNivel=true;}
+            else if(nivel===3){nivel=4;preguntas=JSON.parse(JSON.stringify(preguntasNivel4));subioDeNivel=true;}
+            else if(nivel===4){nivel=5;preguntas=JSON.parse(JSON.stringify(preguntasNivel5));subioDeNivel=true;}
+        } else if(tipoJuego === "antonimos"){
+            if(nivel===1){nivel=2;preguntas=JSON.parse(JSON.stringify(preguntasAntonimosNivel2));subioDeNivel=true;}
+            else if(nivel===2){nivel=3;preguntas=JSON.parse(JSON.stringify(preguntasAntonimosNivel3));subioDeNivel=true;}
+            else if(nivel===3){nivel=4;preguntas=JSON.parse(JSON.stringify(preguntasAntonimosNivel4));subioDeNivel=true;}
+            else if(nivel===4){nivel=5;preguntas=JSON.parse(JSON.stringify(preguntasAntonimosNivel5));subioDeNivel=true;}
         }
-        else if(tipoJuego === "sinonimos"){
-            if(nivel === 1){ nivel = 2; preguntas = [...preguntasNivel2]; subioDeNivel = true; }
-            else if(nivel === 2){ nivel = 3; preguntas = [...preguntasNivel3]; subioDeNivel = true; }
-            else if(nivel === 3){ nivel = 4; preguntas = [...preguntasNivel4]; subioDeNivel = true; }
-            else if(nivel === 4){ nivel = 5; preguntas = [...preguntasNivel5]; subioDeNivel = true; }
-        }
-        else if(tipoJuego === "antonimos"){
-            if(nivel === 1){ nivel = 2; preguntas = [...preguntasAntonimosNivel2]; subioDeNivel = true; }
-            else if(nivel === 2){ nivel = 3; preguntas = [...preguntasAntonimosNivel3]; subioDeNivel = true; }
-            else if(nivel === 3){ nivel = 4; preguntas = [...preguntasAntonimosNivel4]; subioDeNivel = true; }
-            else if(nivel === 4){ nivel = 5; preguntas = [...preguntasAntonimosNivel5]; subioDeNivel = true; }
-        }
-
-        if(subioDeNivel) {
-            actualizarInterfazCompleta();
+        if(subioDeNivel){
+            actualizarInterfazCompleta(); guardarProgreso();
             mostrarMensajeNivel(
-    "🎉 ¡Nivel completado!",
-    "🏆 ¡Nivel " + nivel + " desbloqueado!",
-    cargarPregunta
-);
+                "🎉 ¡Muy bien! ¡Pasaste al nivel " + nivel + "!",
+                "🐼 ¡Desbloqueaste un nuevo nivel! Ahora te esperan preguntas diferentes. ¡Sigue aprendiendo con Panchita!",
+                cargarPregunta
+            );
         } else {
-            alert("🏆🎉 ¡FELICIDADES! 🎉🏆\n\nTerminaste todos los niveles de este juego.\n\n⭐ Puntaje final: " + puntos);
-            cerrarJuego();
+            // Mantener guardado que esta actividad ya fue completada.
+            actividadCompletada = true;
+            guardarProgreso(true);
+            actualizarProgresoGeneral(true);
+            mostrarFinActividad(true);
         }
         return;
     }
-
-    // Continuar en el mismo nivel
-    cargarPregunta();
+    guardarProgreso();
+    setTimeout(cargarPregunta, 850);
 }
-
 function cerrarJuego() {
+    volverMenuJuegos();
+}
+function mostrarFinActividad(completado) {
     detenerTemporizador();
-    document.getElementById("pantallaJuego").style.display = "none";
-    document.querySelector(".puntaje").scrollIntoView({ behavior: "smooth" });
+    document.getElementById("gameOverPanchita")?.remove();
+    const modal = document.createElement("div");
+    modal.id = "gameOverPanchita";
+    modal.style.cssText = "position:fixed;inset:0;background:rgba(20,17,55,.82);display:flex;align-items:center;justify-content:center;padding:18px;z-index:99999;font-family:'Fredoka',sans-serif;overflow:auto;";
+    modal.innerHTML = `<div style="width:100%;max-width:420px;max-height:90vh;overflow:auto;background:linear-gradient(145deg,#29245E,#4541A3);border:2px solid rgba(255,255,255,.25);border-radius:28px;padding:24px 20px;text-align:center;color:white;box-shadow:0 15px 45px rgba(0,0,0,.35);box-sizing:border-box;">
+      <div style="font-size:58px">🐼</div><h2 style="color:#FFE47A">${completado ? "¡FELICIDADES! 🎉" : "¡Cada intento cuenta!"}</h2>
+      <p>${completado ? "¡Terminaste los cinco niveles! Elige otra aventura para seguir aprendiendo." : "Puedes volver a intentarlo o elegir otra actividad."}</p>
+      <p style="font-size:30px;color:#FFE47A">⭐ ${puntos} puntos</p>
+      <button id="reintentarPanchita" style="width:100%;padding:13px;border:0;border-radius:15px;background:#FFE47A;color:#30285E;font-family:inherit;font-size:16px;font-weight:bold;margin:6px 0;cursor:pointer">🔄 Volver a intentar</button>
+      <div style="display:flex;flex-wrap:wrap;gap:7px;justify-content:center">${botonesOtrasActividades()}</div>
+      <button id="volverJuegosPanchita" style="width:100%;padding:12px;border:2px solid rgba(255,255,255,.4);border-radius:15px;background:transparent;color:white;font-family:inherit;font-size:15px;font-weight:bold;margin-top:10px;cursor:pointer">🏠 Menú principal</button>
+    </div>`;
+    document.body.appendChild(modal);
+    document.getElementById("reintentarPanchita").onclick = () => { modal.remove(); abrirJuego(tipoJuego, true); };
+    document.getElementById("volverJuegosPanchita").onclick = () => { modal.remove(); volverMenuJuegos(); };
 }
 
 //==============================
@@ -502,123 +657,17 @@ function mostrarMensajeNivel(titulo, mensaje, continuar) {
 
 function mostrarGameOver() {
     detenerTemporizador();
+    guardarProgreso();
+    mostrarFinActividad(false);
+}
 
-    // Evitar que aparezca más de una ventana
-    document.getElementById("gameOverPanchita")?.remove();
 
-    const modal = document.createElement("div");
-    modal.id = "gameOverPanchita";
-
-    modal.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(20, 17, 55, 0.82);
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        padding: 20px;
-        z-index: 99999;
-        font-family: 'Fredoka', sans-serif;
-    `;
-
-    modal.innerHTML = `
-        <div style="
-            width: 100%;
-            max-width: 380px;
-            background: linear-gradient(145deg, #29245E, #4541A3);
-            border: 2px solid rgba(255,255,255,0.25);
-            border-radius: 28px;
-            padding: 28px 22px;
-            text-align: center;
-            color: white;
-            box-shadow: 0 15px 45px rgba(0,0,0,0.35);
-            box-sizing: border-box;
-        ">
-            <div style="
-                font-size: 65px;
-                margin-bottom: 8px;
-            ">🐼</div>
-
-            <div style="
-                color: #FFE47A;
-                font-size: 13px;
-                letter-spacing: 3px;
-                font-weight: bold;
-            ">¡NO TE RINDAS!</div>
-
-            <h2 style="
-                font-size: 29px;
-                line-height: 1.15;
-                margin: 10px 0;
-            ">¡Oh, oh!<br>La aventura se detuvo</h2>
-
-            <p style="
-                font-size: 15px;
-                color: #E5E5FF;
-                margin: 12px 0 20px;
-            ">
-                ¡Cada intento te ayuda a aprender!
-                Panchita te espera para volver a jugar.
-            </p>
-
-            <div style="
-                background: rgba(255,255,255,0.12);
-                border: 1px solid rgba(255,255,255,0.16);
-                border-radius: 18px;
-                padding: 15px;
-                margin-bottom: 20px;
-            ">
-                <div style="font-size: 13px; color: #D8D8FF;">
-                    TU PUNTAJE
-                </div>
-                <div style="
-                    font-size: 38px;
-                    font-weight: bold;
-                    color: #FFE47A;
-                ">⭐ ${puntos}</div>
-                <div style="font-size: 13px; color: #D8D8FF;">
-                    puntos conseguidos
-                </div>
-            </div>
-
-            <button id="reintentarPanchita" style="
-                width: 100%;
-                padding: 15px 10px;
-                border: none;
-                border-radius: 15px;
-                background: #FFE47A;
-                color: #30285E;
-                font-family: inherit;
-                font-size: 16px;
-                font-weight: bold;
-                cursor: pointer;
-                margin-bottom: 10px;
-            ">🔄 ¡VOLVER A INTENTAR!</button>
-
-            <button id="volverJuegosPanchita" style="
-                width: 100%;
-                padding: 13px 10px;
-                border: 2px solid rgba(255,255,255,0.4);
-                border-radius: 15px;
-                background: transparent;
-                color: white;
-                font-family: inherit;
-                font-size: 15px;
-                font-weight: bold;
-                cursor: pointer;
-            ">← VOLVER A LOS JUEGOS</button>
-        </div>
-    `;
-
-    document.body.appendChild(modal);
-
-    document.getElementById("reintentarPanchita").onclick = () => {
-        modal.remove();
-        abrirJuego(tipoJuego);
-    };
-
-    document.getElementById("volverJuegosPanchita").onclick = () => {
-        modal.remove();
-        cerrarJuego();
-    };
+// Recuperar el resumen guardado al abrir o actualizar la página.
+function cargarResumenGuardadoPanchita() {
+    actualizarProgresoGeneral(true);
+}
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", cargarResumenGuardadoPanchita, { once: true });
+} else {
+    cargarResumenGuardadoPanchita();
 }
